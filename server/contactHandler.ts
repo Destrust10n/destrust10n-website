@@ -1,10 +1,9 @@
-import { Request, Response } from 'express';
 import { z } from 'zod';
-import fs from 'fs';
-import path from 'path';
+import { ApiRequest, ApiResponse } from '../api/types';
+import { persistInquiry, StoredInquiry } from './inquiryStorage';
 
-// HTML Sanitization helper to prevent Stored XSS
-function sanitizeText(input: string): string {
+// HTML Sanitization helper to neutralize Stored XSS vectors
+export function sanitizeText(input: string): string {
   return input
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
@@ -14,53 +13,41 @@ function sanitizeText(input: string): string {
     .trim();
 }
 
-// Validation Schema with strict boundaries and length limits
-const contactSchema = z.object({
+// Zod Validation Schema with strict input boundaries
+export const contactSchema = z.object({
   name: z
-    .string()
+    .string({ required_error: 'Please provide your name or organization.' })
     .trim()
-    .min(2, 'Name must be at least 2 characters')
-    .max(80, 'Name must not exceed 80 characters'),
+    .min(2, 'Name must be at least 2 characters.')
+    .max(80, 'Name cannot exceed 80 characters.'),
   email: z
-    .string()
+    .string({ required_error: 'Please provide an email address.' })
     .trim()
-    .email('Invalid email address')
-    .max(100, 'Email must not exceed 100 characters'),
+    .email('Please provide a valid email address.')
+    .max(100, 'Email cannot exceed 100 characters.'),
   projectType: z
-    .string()
+    .string({ required_error: 'Please select a project type.' })
     .trim()
-    .min(2, 'Project type is required')
-    .max(60, 'Project type must not exceed 60 characters'),
+    .min(2, 'Project type is required.')
+    .max(60, 'Project type cannot exceed 60 characters.'),
   budget: z
     .string()
     .trim()
-    .max(60, 'Budget selection must not exceed 60 characters')
+    .max(60, 'Budget selection cannot exceed 60 characters.')
     .optional(),
   description: z
-    .string()
+    .string({ required_error: 'Please describe your project requirements.' })
     .trim()
-    .min(15, 'Description must be at least 15 characters')
-    .max(1500, 'Description must not exceed 1500 characters'),
-  // Anti-spam honeypot field (should be empty when submitted by human users)
+    .min(15, 'Please provide at least 15 characters describing your project.')
+    .max(1500, 'Description cannot exceed 1500 characters.'),
+  // Anti-spam honeypot field (must remain empty for human users)
   website: z.string().max(100).optional(),
 });
 
-interface StoredInquiry {
-  id: string;
-  timestamp: string;
-  name: string;
-  email: string;
-  projectType: string;
-  budget: string;
-  description: string;
-  ipHash: string;
-  userAgent?: string;
-}
-
-// In-memory rate limiting map: ip -> timestamps[]
+// In-memory sliding-window rate limit tracker
 const rateLimitMap = new Map<string, number[]>();
 
-// Prune expired rate limit entries every 15 minutes to prevent memory leaks
+// Prune expired rate limit entries every 15 minutes
 setInterval(() => {
   const now = Date.now();
   const windowMs = 10 * 60 * 1000;
@@ -74,13 +61,71 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000);
 
-export async function handleContactSubmission(req: Request, res: Response): Promise<void> {
-  try {
-    // 1. Client IP Extraction with safe fallback
-    const clientIp = (req.ip || req.socket.remoteAddress || 'unknown').replace(/[^a-zA-Z0-9.:]/g, '');
-    const now = Date.now();
+/**
+ * Universal request handler compatible with both Express.js and Vercel Serverless Functions
+ */
+export async function handleContactRequest(req: ApiRequest, res: ApiResponse): Promise<void> {
+  // 1. Configure CORS & Security Headers
+  const originHeader = req.headers['origin'];
+  const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
 
-    // 2. IP Rate Limiting: Max 5 submissions per 10 minutes per IP
+  // Determine allowed origin
+  const allowedOrigins = [
+    'https://destrust10n-website.vercel.app',
+    'https://destrust10n.com',
+    'https://www.destrust10n.com',
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:5173',
+  ];
+
+  if (process.env.ALLOWED_ORIGINS) {
+    process.env.ALLOWED_ORIGINS.split(',').forEach((o) => allowedOrigins.push(o.trim()));
+  }
+
+  if (origin && (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app'))) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  } else if (!origin) {
+    // Non-browser or same-origin requests
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else {
+    // Fallback same-origin default
+    res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0]);
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Accept');
+  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+
+  // 2. Handle CORS Preflight (OPTIONS)
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+
+  // 3. Enforce POST Method
+  if (req.method !== 'POST') {
+    res.status(405).json({
+      success: false,
+      message: `Method ${req.method} not allowed. Please use POST.`,
+    });
+    return;
+  }
+
+  try {
+    // 4. Client IP Extraction
+    const forwardedHeader = req.headers['x-forwarded-for'];
+    const forwardedFor = Array.isArray(forwardedHeader) ? forwardedHeader[0] : forwardedHeader;
+    const realIpHeader = req.headers['x-real-ip'];
+    const realIp = Array.isArray(realIpHeader) ? realIpHeader[0] : realIpHeader;
+    const rawIp = (forwardedFor ? forwardedFor.split(',')[0] : null) || realIp || req.ip || req.socket?.remoteAddress || 'unknown';
+    const clientIp = rawIp.replace(/[^a-zA-Z0-9.:]/g, '').slice(0, 45);
+
+    // 5. IP Rate Limiting (5 requests per 10 minutes)
+    const now = Date.now();
     const windowMs = 10 * 60 * 1000;
     const timestamps = rateLimitMap.get(clientIp) || [];
     const recentTimestamps = timestamps.filter((t) => now - t < windowMs);
@@ -97,8 +142,30 @@ export async function handleContactSubmission(req: Request, res: Response): Prom
     recentTimestamps.push(now);
     rateLimitMap.set(clientIp, recentTimestamps);
 
-    // 3. Strict Server-Side Validation via Zod
-    const parseResult = contactSchema.safeParse(req.body);
+    // 6. Safe Body Parsing
+    let rawBody = req.body;
+    if (typeof rawBody === 'string') {
+      try {
+        rawBody = JSON.parse(rawBody);
+      } catch {
+        res.status(400).json({
+          success: false,
+          message: 'Malformed request payload. Expected valid JSON.',
+        });
+        return;
+      }
+    }
+
+    if (!rawBody || typeof rawBody !== 'object') {
+      res.status(400).json({
+        success: false,
+        message: 'Empty or invalid request body.',
+      });
+      return;
+    }
+
+    // 7. Zod Schema Validation
+    const parseResult = contactSchema.safeParse(rawBody);
     if (!parseResult.success) {
       const fieldErrors: Record<string, string> = {};
       parseResult.error.errors.forEach((err) => {
@@ -117,9 +184,9 @@ export async function handleContactSubmission(req: Request, res: Response): Prom
 
     const { name, email, projectType, budget, description, website } = parseResult.data;
 
-    // 4. Anti-Spam Honeypot Verification
+    // 8. Anti-Spam Honeypot Verification
     if (website && website.trim().length > 0) {
-      console.warn(`[DESTRUST10N Security] Automated bot honeypot triggered from ${clientIp}`);
+      console.warn(`[DESTRUST10N Security] Honeypot triggered by client IP: ${clientIp}`);
       res.status(400).json({
         success: false,
         message: 'Spam protection triggered. Submission rejected.',
@@ -127,19 +194,18 @@ export async function handleContactSubmission(req: Request, res: Response): Prom
       return;
     }
 
-    // 5. Input Sanitization
+    // 9. Input Sanitization
     const cleanName = sanitizeText(name);
     const cleanEmail = email.toLowerCase().trim();
     const cleanProjectType = sanitizeText(projectType);
     const cleanBudget = budget ? sanitizeText(budget) : 'Starting Tier ($10 - $25)';
     const cleanDescription = sanitizeText(description);
 
-    // 6. Generate Unique Trackable Reference Code
+    // 10. Generate Trackable Reference Code
     const randomHex = Math.random().toString(36).substring(2, 7).toUpperCase();
     const inquiryId = `D10-INQ-${Date.now().toString().slice(-4)}-${randomHex}`;
     const timestampIso = new Date().toISOString();
 
-    // 7. Secure Local Persistence with Anonymized IP
     const inquiryRecord: StoredInquiry = {
       id: inquiryId,
       timestamp: timestampIso,
@@ -149,45 +215,14 @@ export async function handleContactSubmission(req: Request, res: Response): Prom
       budget: cleanBudget,
       description: cleanDescription,
       ipHash: clientIp.substring(0, 15),
-      userAgent: req.headers['user-agent']?.substring(0, 80),
+      userAgent: (Array.isArray(req.headers['user-agent']) ? req.headers['user-agent'][0] : req.headers['user-agent'])?.substring(0, 80),
+      status: 'new',
     };
 
-    const dataDir = path.resolve(process.cwd(), 'server/data');
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
+    // 11. Multi-Store Persistent Storage
+    await persistInquiry(inquiryRecord);
 
-    const filePath = path.join(dataDir, 'inquiries.json');
-    let existingInquiries: StoredInquiry[] = [];
-
-    if (fs.existsSync(filePath)) {
-      try {
-        const fileContent = fs.readFileSync(filePath, 'utf-8');
-        existingInquiries = JSON.parse(fileContent);
-      } catch {
-        existingInquiries = [];
-      }
-    }
-
-    existingInquiries.push(inquiryRecord);
-    fs.writeFileSync(filePath, JSON.stringify(existingInquiries, null, 2), 'utf-8');
-
-    // 8. Email Delivery Relay Check
-    const destinationStudioEmail = process.env.STUDIO_ALERT_EMAIL || 'destrust100n@gmail.com';
-
-    if (process.env.RESEND_API_KEY) {
-      try {
-        console.log(`[DESTRUST10N Server] Outbound relay triggered for ${destinationStudioEmail} (${inquiryId})`);
-      } catch (emailErr) {
-        console.error('[DESTRUST10N Server] Email alert dispatch failed, but inquiry was safely stored:', emailErr);
-      }
-    } else {
-      console.log(
-        `[DESTRUST10N Server] Inquiry ${inquiryId} logged to server/data/inquiries.json. (To enable live email dispatch, configure RESEND_API_KEY in .env). Target inbox: ${destinationStudioEmail}`
-      );
-    }
-
-    // 9. Safe, Non-Leaking Success Response
+    // 12. Safe, Non-Leaking Success Response
     res.status(200).json({
       success: true,
       message: 'Your project inquiry has been securely received by DESTRUST10N.',
@@ -201,10 +236,10 @@ export async function handleContactSubmission(req: Request, res: Response): Prom
       }),
     });
   } catch (error) {
-    console.error('[DESTRUST10N Server] Error handling contact submission:', error);
+    console.error('[DESTRUST10N API] Unexpected error handling contact submission:', error);
     res.status(500).json({
       success: false,
-      message: 'Internal server error while processing inquiry. Please retry.',
+      message: 'A secure server error occurred while processing your inquiry. Please retry.',
     });
   }
 }

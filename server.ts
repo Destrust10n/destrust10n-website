@@ -3,7 +3,7 @@ import http from 'http';
 import path from 'path';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { handleContactSubmission } from './server/contactHandler';
+import { handleContactRequest } from './server/contactHandler';
 
 dotenv.config();
 
@@ -95,11 +95,19 @@ app.get('/api/health', (_req: Request, res: Response) => {
     tagline: 'Building Beyond Limits',
     version: '1.0.0',
     timestamp: new Date().toISOString(),
+    environment: 'node-server',
+    storageProviders: {
+      supabase: Boolean(process.env.SUPABASE_URL && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)),
+      firestore: Boolean(process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_API_KEY),
+      resendMailer: Boolean(process.env.RESEND_API_KEY),
+    },
   });
 });
 
-// Real functional contact form API route with strict validation
-app.post('/api/contact', handleContactSubmission);
+// Universal contact form API route with strict validation and multi-store persistence
+app.all('/api/contact', (req: Request, res: Response) => {
+  return handleContactRequest(req as any, res as any);
+});
 
 // Global Error Handler (Never leaks internal stack traces to the public)
 app.use((err: unknown, req: Request, res: Response, _next: NextFunction) => {

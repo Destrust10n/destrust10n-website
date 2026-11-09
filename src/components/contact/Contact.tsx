@@ -167,12 +167,27 @@ export const Contact: React.FC = () => {
         body: JSON.stringify(formData),
       });
 
-      const data: ContactSubmissionResponse = await res.json();
+      let data: ContactSubmissionResponse | null = null;
+      const contentType = res.headers.get('content-type') || '';
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.message || 'Server error while transmitting inquiry.');
+      if (contentType.includes('application/json')) {
+        data = await res.json();
+      } else {
+        const rawText = await res.text();
+        if (res.status === 404) {
+          throw new Error('API route /api/contact is unavailable (HTTP 404). Please ensure serverless functions are deployed.');
+        }
+        throw new Error(rawText.slice(0, 120) || `Server returned unexpected HTTP ${res.status}`);
       }
 
+      if (!res.ok || !data?.success) {
+        if (data?.errors) {
+          setErrors(data.errors);
+        }
+        throw new Error(data?.message || `Server returned HTTP ${res.status} while processing inquiry.`);
+      }
+
+      // Confirmed success: Store result and reset form
       setSubmitResult(data);
       setFormData({
         name: '',
@@ -186,6 +201,7 @@ export const Contact: React.FC = () => {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to connect to backend server.';
       setServerError(msg);
+      // Notice: formData is intentionally preserved so the user never loses their typed inquiry
     } finally {
       setIsSubmitting(false);
     }

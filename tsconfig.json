@@ -23,6 +23,6 @@
     },
     "noEmit": true
   },
-  "include": ["src", "server.ts", "server"],
+  "include": ["src", "server.ts", "server", "api"],
   "exclude": ["node_modules", "dist"]
 }
