@@ -4,6 +4,8 @@ import path from 'path';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import contactHandler from './api/contact';
+import availabilityHandler from './api/availability';
+import adminHandler from './api/admin';
 
 dotenv.config();
 
@@ -40,8 +42,8 @@ app.use(
         callback(new Error('Cross-Origin Request Blocked by Security Policy'));
       }
     },
-    methods: ['GET', 'POST'],
-    allowedHeaders: ['Content-Type', 'Accept'],
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Accept', 'Authorization', 'x-admin-token'],
     credentials: true,
     maxAge: 86400, // 24 hours preflight cache
   })
@@ -107,6 +109,20 @@ app.get('/api/health', (_req: Request, res: Response) => {
 // Universal contact form API route with strict validation and multi-store persistence
 app.all('/api/contact', (req: Request, res: Response) => {
   return contactHandler(req as any, res as any);
+});
+
+// "One Day, One Work" Availability status endpoint
+app.all('/api/availability', (req: Request, res: Response) => {
+  return availabilityHandler(req as any, res as any);
+});
+
+// Administrative Control Hub (Dashboard & Inquiry Management)
+app.all('/api/admin', (req: Request, res: Response) => {
+  return adminHandler(req as any, res as any);
+});
+app.all('/api/admin/:action', (req: Request, res: Response) => {
+  req.query.action = req.params.action;
+  return adminHandler(req as any, res as any);
 });
 
 // Global Error Handler (Never leaks internal stack traces to the public)

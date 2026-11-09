@@ -1,5 +1,5 @@
 import React from 'react';
-import { ArrowUp, Github, Mail } from 'lucide-react';
+import { ArrowUp, Github, Mail, Lock } from 'lucide-react';
 
 export const Footer: React.FC = () => {
   const scrollTo = (id: string) => {
@@ -24,7 +24,7 @@ export const Footer: React.FC = () => {
 
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-8 pb-12 border-b border-white/10">
-          
+
           {/* Logo, Tagline & Direct Email */}
           <div className="flex flex-col">
             <div className="flex items-center gap-3 mb-2">
@@ -95,7 +95,15 @@ export const Footer: React.FC = () => {
           <div className="flex items-center gap-4">
             <span className="text-[#00E5FF]">DIGITAL DEVELOPMENT STUDIO</span>
             <span className="text-white/20">|</span>
-            <span>OBSIDIAN & ELECTRIC CYAN</span>
+            <button
+              type="button"
+              onClick={() => window.dispatchEvent(new Event('open-admin'))}
+              className="text-[#929AA5] hover:text-[#00E5FF] transition-colors flex items-center gap-1 cursor-pointer"
+              title="Studio Operations Hub"
+            >
+              <Lock className="w-3 h-3 text-[#00E5FF]/60" />
+              <span>Studio Ops</span>
+            </button>
           </div>
         </div>
 

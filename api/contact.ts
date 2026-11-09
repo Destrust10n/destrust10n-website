@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 
 export interface ApiRequest {
   method?: string;
@@ -33,7 +34,32 @@ export interface StoredInquiry {
   description: string;
   ipHash: string;
   userAgent?: string;
-  status: 'new' | 'reviewed' | 'contacted';
+  status: 'new' | 'reviewed' | 'closed';
+}
+
+// In-memory duplicate submission detector (5-minute sliding window)
+const recentSubmissionsCache = new Map<string, number>();
+
+function isDuplicateSubmission(email: string, description: string): boolean {
+  const hash = crypto
+    .createHash('sha256')
+    .update(`${email.trim().toLowerCase()}:${description.trim()}`)
+    .digest('hex');
+  const now = Date.now();
+  const windowMs = 5 * 60 * 1000; // 5 minutes
+
+  for (const [k, timestamp] of recentSubmissionsCache.entries()) {
+    if (now - timestamp > windowMs) {
+      recentSubmissionsCache.delete(k);
+    }
+  }
+
+  if (recentSubmissionsCache.has(hash)) {
+    return true;
+  }
+
+  recentSubmissionsCache.set(hash, now);
+  return false;
 }
 
 // HTML Sanitization helper to neutralize Stored XSS vectors
@@ -147,9 +173,16 @@ async function checkDistributedRateLimit(clientIp: string): Promise<{ allowed: b
  * 3. Fallback: Local /tmp or server/data file + structured audit logging
  * 4. Notifications: Resend API email alert to destrust100n@gmail.com
  */
-async function persistInquiry(record: StoredInquiry): Promise<{ stored: boolean; provider: string }> {
+async function persistInquiry(record: StoredInquiry): Promise<{
+  stored: boolean;
+  provider: string;
+  emailSent: boolean;
+  emailError: string | null
+}> {
   let stored = false;
   let provider = 'audit_log';
+  let emailSent = false;
+  let emailError: string | null = null;
 
   // 1. Primary Cloud Database: Supabase PostgreSQL
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
@@ -169,6 +202,7 @@ async function persistInquiry(record: StoredInquiry): Promise<{ stored: boolean;
         body: JSON.stringify({
           id: record.id,
           timestamp: record.timestamp,
+          created_at: record.timestamp,
           name: record.name,
           email: record.email,
           project_type: record.projectType,
@@ -349,17 +383,20 @@ async function persistInquiry(record: StoredInquiry): Promise<{ stored: boolean;
       });
 
       if (emailResponse.ok) {
+        emailSent = true;
         console.log(`[DESTRUST10N Mailer] Notification email dispatched to ${alertRecipient} via Resend.`);
       } else {
         const emailErr = await emailResponse.text();
+        emailError = `Resend HTTP ${emailResponse.status}: ${emailErr}`;
         console.warn(`[DESTRUST10N Mailer] Resend returned HTTP ${emailResponse.status}: ${emailErr}`);
       }
     } catch (mailError) {
+      emailError = mailError instanceof Error ? mailError.message : String(mailError);
       console.error('[DESTRUST10N Mailer] Email dispatch failed, but inquiry is safely stored:', mailError);
     }
   }
 
-  return { stored, provider };
+  return { stored, provider, emailSent, emailError };
 }
 
 /**
@@ -492,7 +529,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     const cleanBudget = budget ? sanitizeText(budget) : 'Starting Tier ($10 - $25)';
     const cleanDescription = sanitizeText(description);
 
-    // 10. Generate Trackable Reference Code
+    // 10. Duplicate Submission Check (5-minute sliding window)
+    if (isDuplicateSubmission(cleanEmail, cleanDescription)) {
+      res.status(409).json({
+        success: false,
+        message: 'Duplicate inquiry detected. An inquiry with these exact details was submitted recently. Please allow time for review before resubmitting.',
+      });
+      return;
+    }
+
+    // 11. Generate Trackable Reference Code
     const randomHex = Math.random().toString(36).substring(2, 7).toUpperCase();
     const inquiryId = `D10-INQ-${Date.now().toString().slice(-4)}-${randomHex}`;
     const timestampIso = new Date().toISOString();
@@ -510,14 +556,28 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       status: 'new',
     };
 
-    // 11. Multi-Store Persistent Storage (Supabase PostgreSQL primary)
-    await persistInquiry(inquiryRecord);
+    // 12. Multi-Store Persistent Storage (Supabase PostgreSQL primary)
+    const storageResult = await persistInquiry(inquiryRecord);
 
-    // 12. Safe Success Response
+    if (!storageResult.stored) {
+      res.status(500).json({
+        success: false,
+        message: 'Unable to save your inquiry to persistent storage at this moment. Please reach out to us at destrust100n@gmail.com.',
+      });
+      return;
+    }
+
+    // 13. Safe Success Response
+    const emailNotice = storageResult.emailError
+      ? ' (Note: Email notification relay experienced a delivery issue, but your inquiry is securely preserved for review).'
+      : '';
+
     res.status(200).json({
       success: true,
-      message: 'Your project inquiry has been securely received by DESTRUST10N.',
+      message: `Your project inquiry has been securely received by DESTRUST10N.${emailNotice}`,
       inquiryId,
+      provider: storageResult.provider,
+      emailDelivered: storageResult.emailSent,
       timestamp: new Date().toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',

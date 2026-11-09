@@ -1,6 +1,7 @@
 import React, { Suspense, lazy, useRef, useEffect } from 'react';
 import { ArrowDown, ArrowUpRight, ShieldCheck, Zap, Terminal, Sparkles, Loader2 } from 'lucide-react';
 import gsap from 'gsap';
+import { AvailabilityIndicator } from '../layout/AvailabilityIndicator';
 
 // Lazy-load the heavy 3D Three.js Monolith
 const Hero3DMonolith = lazy(() =>
@@ -80,19 +81,19 @@ export const Hero: React.FC<HeroProps> = ({ canAnimateText = true }) => {
   };
 
   return (
-    <section 
-      id="home" 
+    <section
+      id="home"
       ref={heroRef}
       className="relative min-h-screen pt-28 pb-16 sm:pb-24 flex items-center justify-center overflow-hidden"
     >
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 w-full">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
-          
+
           {/* Left Column: Typography & Intent */}
           <div className="lg:col-span-7 flex flex-col items-start z-10">
-            
+
             {/* Status Pill */}
-            <div 
+            <div
               ref={statusPillRef}
               className="inline-flex items-center gap-2.5 px-4 py-1.5 rounded-full glass-pill text-xs font-mono text-[#00E5FF] mb-6 border-[#00E5FF]/30 box-cyan-glow opacity-0"
             >
@@ -105,7 +106,7 @@ export const Hero: React.FC<HeroProps> = ({ canAnimateText = true }) => {
 
             {/* Main Headline with Masked Line Reveals */}
             <div className="overflow-hidden mb-1">
-              <h1 
+              <h1
                 ref={line1Ref}
                 className="font-heading font-extrabold text-5xl sm:text-7xl xl:text-8xl tracking-tight text-[#F5F7FA] leading-[1.04]"
               >
@@ -114,7 +115,7 @@ export const Hero: React.FC<HeroProps> = ({ canAnimateText = true }) => {
             </div>
 
             <div className="overflow-hidden mb-6">
-              <h1 
+              <h1
                 ref={line2Ref}
                 className="font-heading font-extrabold text-5xl sm:text-7xl xl:text-8xl tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-[#00E5FF] via-[#70EEFF] to-[#F5F7FA] text-cyan-glow leading-[1.04]"
               >
@@ -123,7 +124,7 @@ export const Hero: React.FC<HeroProps> = ({ canAnimateText = true }) => {
             </div>
 
             {/* Supporting Text */}
-            <p 
+            <p
               ref={subTextRef}
               className="text-base sm:text-xl text-[#929AA5] max-w-2xl leading-relaxed mb-10 font-normal opacity-0"
             >
@@ -131,7 +132,7 @@ export const Hero: React.FC<HeroProps> = ({ canAnimateText = true }) => {
             </p>
 
             {/* Action Buttons */}
-            <div 
+            <div
               ref={buttonsRef}
               className="flex flex-wrap items-center gap-4 sm:gap-5 w-full sm:w-auto opacity-0"
             >
@@ -154,10 +155,15 @@ export const Hero: React.FC<HeroProps> = ({ canAnimateText = true }) => {
               </button>
             </div>
 
+            {/* Daily Availability Indicator ("One Day, One Work") */}
+            <div className="mt-8 w-full">
+              <AvailabilityIndicator variant="detailed" />
+            </div>
+
             {/* Key Technical Pillars Mini-Bar */}
-            <div 
+            <div
               ref={pillarsRef}
-              className="mt-12 pt-8 border-t border-white/10 w-full grid grid-cols-3 gap-4 opacity-0"
+              className="mt-8 pt-6 border-t border-white/10 w-full grid grid-cols-3 gap-4 opacity-0"
             >
               <div className="flex flex-col">
                 <div className="flex items-center gap-1.5 text-xs text-[#00E5FF] font-mono mb-1">

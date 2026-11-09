@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Menu, X, ArrowUpRight, Sparkles } from 'lucide-react';
+import { AvailabilityIndicator } from './AvailabilityIndicator';
 
 interface NavbarProps {
   activeSection: string;
@@ -39,10 +40,10 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSection }) => {
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 flex justify-center px-4 pt-4 sm:pt-6 pointer-events-none">
-      <div 
+      <div
         className={`w-full max-w-6xl transition-all duration-300 pointer-events-auto rounded-full ${
-          isScrolled 
-            ? 'glass-panel py-2.5 px-4 sm:px-6 shadow-[0_20px_40px_rgba(0,0,0,0.85)] border-[#00E5FF]/25' 
+          isScrolled
+            ? 'glass-panel py-2.5 px-4 sm:px-6 shadow-[0_20px_40px_rgba(0,0,0,0.85)] border-[#00E5FF]/25'
             : 'glass-panel-subtle py-3 px-4 sm:px-6 border-white/10'
         }`}
       >
@@ -99,7 +100,9 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSection }) => {
           </nav>
 
           {/* Right Action / Mobile Hamburger */}
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <AvailabilityIndicator variant="pill" className="hidden lg:inline-flex" />
+
             <a
               href="#contact"
               onClick={(e) => handleNavClick(e, '#contact')}
@@ -125,6 +128,9 @@ export const Navbar: React.FC<NavbarProps> = ({ activeSection }) => {
         {/* Mobile Navigation Drawer Overlay */}
         {mobileMenuOpen && (
           <div className="md:hidden mt-3 pt-3 border-t border-[#00E5FF]/15 animate-in fade-in slide-in-from-top-2 duration-200">
+            <div className="px-2 pb-3">
+              <AvailabilityIndicator variant="pill" className="w-full justify-center" />
+            </div>
             <div className="flex flex-col gap-1 pb-2">
               {navLinks.map((link) => {
                 const isActive = activeSection === link.href.substring(1);

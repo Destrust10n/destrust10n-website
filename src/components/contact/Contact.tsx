@@ -1,19 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Send, 
-  CheckCircle2, 
-  AlertCircle, 
-  Loader2, 
-  Mail, 
-  Clock, 
-  Sparkles, 
-  ShieldCheck, 
-  Copy, 
-  Check 
+import {
+  Send,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  Mail,
+  Clock,
+  Sparkles,
+  ShieldCheck,
+  Copy,
+  Check
 } from 'lucide-react';
 import gsap from 'gsap';
 import { ScrollTrigger } from 'gsap/ScrollTrigger';
 import { ContactFormData, ContactSubmissionResponse } from '../../types';
+import { AvailabilityIndicator } from '../layout/AvailabilityIndicator';
 
 gsap.registerPlugin(ScrollTrigger);
 
@@ -189,6 +190,7 @@ export const Contact: React.FC = () => {
 
       // Confirmed success: Store result and reset form
       setSubmitResult(data);
+      window.dispatchEvent(new Event('availability-updated'));
       setFormData({
         name: '',
         email: '',
@@ -208,15 +210,15 @@ export const Contact: React.FC = () => {
   };
 
   return (
-    <section 
-      id="contact" 
-      ref={sectionRef} 
+    <section
+      id="contact"
+      ref={sectionRef}
       className="relative py-24 sm:py-32 overflow-hidden"
     >
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-start">
-          
+
           {/* Left Column: Direct Studio Information */}
           <div className="lg:col-span-5">
             <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full glass-pill text-xs font-mono text-[#00E5FF] mb-4">
@@ -232,9 +234,12 @@ export const Contact: React.FC = () => {
             </h2>
 
             <p className="text-base text-[#929AA5] leading-relaxed mb-8">
-              Whether you need a starter landing page, a professional business web hub, or a custom spatial portfolio, 
+              Whether you need a starter landing page, a professional business web hub, or a custom spatial portfolio,
               we are ready to bring your vision into reality.
             </p>
+
+            {/* Live Availability Indicator */}
+            <AvailabilityIndicator variant="detailed" className="mb-8" />
 
             {/* Direct Studio Email Box */}
             <div className="p-5 rounded-2xl glass-panel-subtle border border-[#00E5FF]/25 mb-8">
@@ -301,11 +306,11 @@ export const Contact: React.FC = () => {
 
           {/* Right Column: High-Performance Glass Contact Form */}
           <div className="lg:col-span-7">
-            <div 
+            <div
               ref={formCardRef}
               className="glass-panel p-6 sm:p-10 rounded-3xl border border-[#00E5FF]/25 shadow-2xl relative"
             >
-              
+
               {/* Success Notification View */}
               {submitResult ? (
                 <div className="py-10 text-center animate-in fade-in zoom-in-95 duration-300">
@@ -342,7 +347,15 @@ export const Contact: React.FC = () => {
                 </div>
               ) : (
                 <form onSubmit={handleSubmit} noValidate className="space-y-6">
-                  
+
+                  {/* Realtime Availability Status Header */}
+                  <div className="pb-4 border-b border-white/10 flex items-center justify-between">
+                    <AvailabilityIndicator variant="compact" />
+                    <span className="text-[10px] font-mono text-[#00E5FF] bg-[#00E5FF]/10 px-2.5 py-1 rounded-full border border-[#00E5FF]/20">
+                      1 Day // 1 Work
+                    </span>
+                  </div>
+
                   {/* Anti-Spam Honeypot Field (Invisible to human users, traps automated bots) */}
                   <div className="opacity-0 absolute -z-50 w-0 h-0 overflow-hidden" aria-hidden="true">
                     <label htmlFor="website">Website</label>

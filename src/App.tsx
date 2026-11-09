@@ -10,9 +10,20 @@ import { Pricing } from './components/pricing/Pricing';
 import { Contact } from './components/contact/Contact';
 import { Footer } from './components/footer/Footer';
 import { CinematicIntro } from './components/layout/CinematicIntro';
+import { AdminDashboard } from './components/admin/AdminDashboard';
 
 export function App() {
   const [activeSection, setActiveSection] = useState<string>('home');
+  const [adminOpen, setAdminOpen] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      return (
+        window.location.hash === '#admin' ||
+        window.location.search.includes('admin') ||
+        window.location.pathname === '/admin'
+      );
+    }
+    return false;
+  });
   const [introFinished, setIntroFinished] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       const hasSeen = sessionStorage.getItem('d10_cinematic_intro_shown');
@@ -22,10 +33,26 @@ export function App() {
     return false;
   });
 
+  // Listen to admin modal trigger events
+  useEffect(() => {
+    const handleOpenAdmin = () => setAdminOpen(true);
+    window.addEventListener('open-admin', handleOpenAdmin);
+
+    const handleHash = () => {
+      if (window.location.hash === '#admin') setAdminOpen(true);
+    };
+    window.addEventListener('hashchange', handleHash);
+
+    return () => {
+      window.removeEventListener('open-admin', handleOpenAdmin);
+      window.removeEventListener('hashchange', handleHash);
+    };
+  }, []);
+
   // Track active section on scroll
   useEffect(() => {
     const sectionIds = ['home', 'about', 'services', 'projects', 'process', 'pricing', 'contact'];
-    
+
     const handleScroll = () => {
       const scrollY = window.scrollY;
 
@@ -72,6 +99,9 @@ export function App() {
 
       {/* Minimal Studio Footer */}
       <Footer />
+
+      {/* Secure Studio Operations Admin Hub */}
+      {adminOpen && <AdminDashboard onClose={() => setAdminOpen(false)} />}
     </div>
   );
 }
