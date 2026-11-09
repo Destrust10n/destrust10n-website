@@ -1,0 +1,44 @@
+name: "Security & Build Quality CI"
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  audit-and-build:
+    name: Typecheck & Production Build Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js Runtime
+        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4.2.0
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Strict TypeScript Compilation
+        run: npx tsc --noEmit
+
+      - name: Production Vite Build
+        run: npm run build
+
+      - name: Secret Scanning Pattern Check
+        run: |
+          echo "Scanning for potential committed credentials or private keys..."
+          ! grep -rI --exclude-dir={node_modules,.git,dist} -E "(AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z\\-_]{35}|ghp_[0-9a-zA-Z]{36}|-----BEGIN PRIVATE KEY-----)" .
