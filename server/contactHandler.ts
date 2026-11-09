@@ -13,30 +13,30 @@ export function sanitizeText(input: string): string {
     .trim();
 }
 
-// Zod Validation Schema with strict input boundaries
+// Zod Validation Schema with strict input boundaries (Zod 4 & 3 compatible)
 export const contactSchema = z.object({
   name: z
-    .string({ required_error: 'Please provide your name or organization.' })
+    .string()
     .trim()
     .min(2, 'Name must be at least 2 characters.')
     .max(80, 'Name cannot exceed 80 characters.'),
   email: z
-    .string({ required_error: 'Please provide an email address.' })
+    .string()
     .trim()
     .email('Please provide a valid email address.')
-    .max(100, 'Email cannot exceed 100 characters.'),
+    .max(100, 'Email must not exceed 100 characters.'),
   projectType: z
-    .string({ required_error: 'Please select a project type.' })
+    .string()
     .trim()
     .min(2, 'Project type is required.')
-    .max(60, 'Project type cannot exceed 60 characters.'),
+    .max(60, 'Project type must not exceed 60 characters.'),
   budget: z
     .string()
     .trim()
     .max(60, 'Budget selection cannot exceed 60 characters.')
     .optional(),
   description: z
-    .string({ required_error: 'Please describe your project requirements.' })
+    .string()
     .trim()
     .min(15, 'Please provide at least 15 characters describing your project.')
     .max(1500, 'Description cannot exceed 1500 characters.'),
@@ -44,22 +44,65 @@ export const contactSchema = z.object({
   website: z.string().max(100).optional(),
 });
 
-// In-memory sliding-window rate limit tracker
-const rateLimitMap = new Map<string, number[]>();
+// In-memory sliding-window rate limit tracker (Local Fallback)
+const inMemoryRateLimitMap = new Map<string, number[]>();
 
-// Prune expired rate limit entries every 15 minutes
-setInterval(() => {
+function checkInMemoryRateLimit(clientIp: string): { allowed: boolean; waitMinutes: number } {
   const now = Date.now();
   const windowMs = 10 * 60 * 1000;
-  for (const [ip, timestamps] of rateLimitMap.entries()) {
-    const valid = timestamps.filter((t) => now - t < windowMs);
-    if (valid.length === 0) {
-      rateLimitMap.delete(ip);
-    } else {
-      rateLimitMap.set(ip, valid);
+  const timestamps = inMemoryRateLimitMap.get(clientIp) || [];
+  const recentTimestamps = timestamps.filter((t) => now - t < windowMs);
+
+  if (recentTimestamps.length >= 5) {
+    const waitMinutes = Math.ceil((windowMs - (now - recentTimestamps[0])) / 60000);
+    return { allowed: false, waitMinutes };
+  }
+
+  recentTimestamps.push(now);
+  inMemoryRateLimitMap.set(clientIp, recentTimestamps);
+  return { allowed: true, waitMinutes: 0 };
+}
+
+/**
+ * Distributed rate limiter with Upstash Redis and in-memory fallback
+ */
+async function checkDistributedRateLimit(clientIp: string): Promise<{ allowed: boolean; waitMinutes: number }> {
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+
+  if (upstashUrl && upstashToken) {
+    try {
+      const key = `ratelimit:contact:${clientIp}`;
+      const windowSeconds = 600; // 10 minutes
+      const maxLimit = 5;
+
+      const response = await fetch(`${upstashUrl.replace(/\/$/, '')}/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${upstashToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([
+          ['INCR', key],
+          ['EXPIRE', key, windowSeconds],
+        ]),
+      });
+
+      if (response.ok) {
+        const results = await response.json();
+        const currentCount = Number(results[0]?.result || 1);
+        if (currentCount > maxLimit) {
+          return { allowed: false, waitMinutes: 10 };
+        }
+        return { allowed: true, waitMinutes: 0 };
+      }
+    } catch (redisErr) {
+      console.warn('[DESTRUST10N RateLimiter] Upstash Redis check failed, falling back to in-memory:', redisErr);
     }
   }
-}, 15 * 60 * 1000);
+
+  return checkInMemoryRateLimit(clientIp);
+}
 
 /**
  * Universal request handler compatible with both Express.js and Vercel Serverless Functions
@@ -69,7 +112,6 @@ export async function handleContactRequest(req: ApiRequest, res: ApiResponse): P
   const originHeader = req.headers['origin'];
   const origin = Array.isArray(originHeader) ? originHeader[0] : originHeader;
 
-  // Determine allowed origin
   const allowedOrigins = [
     'https://destrust10n-website.vercel.app',
     'https://destrust10n.com',
@@ -87,10 +129,8 @@ export async function handleContactRequest(req: ApiRequest, res: ApiResponse): P
   if (origin && (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app'))) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   } else if (!origin) {
-    // Non-browser or same-origin requests
     res.setHeader('Access-Control-Allow-Origin', '*');
   } else {
-    // Fallback same-origin default
     res.setHeader('Access-Control-Allow-Origin', allowedOrigins[0]);
   }
 
@@ -116,31 +156,23 @@ export async function handleContactRequest(req: ApiRequest, res: ApiResponse): P
   }
 
   try {
-    // 4. Client IP Extraction
-    const forwardedHeader = req.headers['x-forwarded-for'];
-    const forwardedFor = Array.isArray(forwardedHeader) ? forwardedHeader[0] : forwardedHeader;
+    // 4. Client IP Extraction prioritizing x-real-ip
     const realIpHeader = req.headers['x-real-ip'];
     const realIp = Array.isArray(realIpHeader) ? realIpHeader[0] : realIpHeader;
-    const rawIp = (forwardedFor ? forwardedFor.split(',')[0] : null) || realIp || req.ip || req.socket?.remoteAddress || 'unknown';
+    const forwardedHeader = req.headers['x-forwarded-for'];
+    const forwardedFor = Array.isArray(forwardedHeader) ? forwardedHeader[0] : forwardedHeader;
+    const rawIp = realIp || (forwardedFor ? forwardedFor.split(',')[0].trim() : null) || req.ip || req.socket?.remoteAddress || 'unknown';
     const clientIp = rawIp.replace(/[^a-zA-Z0-9.:]/g, '').slice(0, 45);
 
-    // 5. IP Rate Limiting (5 requests per 10 minutes)
-    const now = Date.now();
-    const windowMs = 10 * 60 * 1000;
-    const timestamps = rateLimitMap.get(clientIp) || [];
-    const recentTimestamps = timestamps.filter((t) => now - t < windowMs);
-
-    if (recentTimestamps.length >= 5) {
-      const waitMinutes = Math.ceil((windowMs - (now - recentTimestamps[0])) / 60000);
+    // 5. Distributed / In-Memory Rate Limiting Check
+    const { allowed, waitMinutes } = await checkDistributedRateLimit(clientIp);
+    if (!allowed) {
       res.status(429).json({
         success: false,
         message: `Too many submissions from this connection. Please retry in ${waitMinutes} minute(s).`,
       });
       return;
     }
-
-    recentTimestamps.push(now);
-    rateLimitMap.set(clientIp, recentTimestamps);
 
     // 6. Safe Body Parsing
     let rawBody = req.body;
@@ -168,8 +200,9 @@ export async function handleContactRequest(req: ApiRequest, res: ApiResponse): P
     const parseResult = contactSchema.safeParse(rawBody);
     if (!parseResult.success) {
       const fieldErrors: Record<string, string> = {};
-      parseResult.error.errors.forEach((err) => {
-        if (err.path[0]) {
+      const issues = (parseResult.error as any).issues || (parseResult.error as any).errors || [];
+      issues.forEach((err: any) => {
+        if (err.path && err.path[0]) {
           fieldErrors[err.path[0] as string] = err.message;
         }
       });
@@ -222,7 +255,7 @@ export async function handleContactRequest(req: ApiRequest, res: ApiResponse): P
     // 11. Multi-Store Persistent Storage
     await persistInquiry(inquiryRecord);
 
-    // 12. Safe, Non-Leaking Success Response
+    // 12. Safe Success Response
     res.status(200).json({
       success: true,
       message: 'Your project inquiry has been securely received by DESTRUST10N.',

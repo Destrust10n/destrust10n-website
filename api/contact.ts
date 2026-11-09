@@ -47,20 +47,20 @@ function sanitizeText(input: string): string {
     .trim();
 }
 
-// Zod Validation Schema with strict input boundaries
+// Zod Validation Schema with strict input boundaries (Zod 4 & 3 compatible)
 const contactSchema = z.object({
   name: z
-    .string({ required_error: 'Please provide your name or organization.' })
+    .string()
     .trim()
     .min(2, 'Name must be at least 2 characters.')
     .max(80, 'Name cannot exceed 80 characters.'),
   email: z
-    .string({ required_error: 'Please provide an email address.' })
+    .string()
     .trim()
     .email('Please provide a valid email address.')
-    .max(100, 'Email must not exceed 100 characters.'),
+    .max(100, 'Email cannot exceed 100 characters.'),
   projectType: z
-    .string({ required_error: 'Please select a project type.' })
+    .string()
     .trim()
     .min(2, 'Project type is required.')
     .max(60, 'Project type must not exceed 60 characters.'),
@@ -70,7 +70,7 @@ const contactSchema = z.object({
     .max(60, 'Budget selection cannot exceed 60 characters.')
     .optional(),
   description: z
-    .string({ required_error: 'Please describe your project requirements.' })
+    .string()
     .trim()
     .min(15, 'Please provide at least 15 characters describing your project.')
     .max(1500, 'Description cannot exceed 1500 characters.'),
@@ -78,13 +78,13 @@ const contactSchema = z.object({
   website: z.string().max(100).optional(),
 });
 
-// In-memory sliding-window rate limit tracker
-const rateLimitMap = new Map<string, number[]>();
+// In-memory sliding-window rate limit tracker (Local Fallback)
+const inMemoryRateLimitMap = new Map<string, number[]>();
 
-function checkRateLimit(clientIp: string): { allowed: boolean; waitMinutes: number } {
+function checkInMemoryRateLimit(clientIp: string): { allowed: boolean; waitMinutes: number } {
   const now = Date.now();
   const windowMs = 10 * 60 * 1000;
-  const timestamps = rateLimitMap.get(clientIp) || [];
+  const timestamps = inMemoryRateLimitMap.get(clientIp) || [];
   const recentTimestamps = timestamps.filter((t) => now - t < windowMs);
 
   if (recentTimestamps.length >= 5) {
@@ -93,22 +93,65 @@ function checkRateLimit(clientIp: string): { allowed: boolean; waitMinutes: numb
   }
 
   recentTimestamps.push(now);
-  rateLimitMap.set(clientIp, recentTimestamps);
+  inMemoryRateLimitMap.set(clientIp, recentTimestamps);
   return { allowed: true, waitMinutes: 0 };
 }
 
 /**
- * Persists an inquiry across available providers:
- * 1. Supabase (PostgreSQL) if SUPABASE_URL & SUPABASE_SERVICE_ROLE_KEY are set
- * 2. Firebase Firestore if FIREBASE_PROJECT_ID is set
- * 3. File system persistence (local server/data or serverless /tmp)
- * 4. Email notification via Resend to destrust100n@gmail.com if RESEND_API_KEY is set
+ * Distributed rate limiter with Upstash Redis and in-memory fallback
  */
-async function persistInquiry(record: StoredInquiry): Promise<void> {
+async function checkDistributedRateLimit(clientIp: string): Promise<{ allowed: boolean; waitMinutes: number }> {
+  const upstashUrl = process.env.UPSTASH_REDIS_REST_URL?.trim();
+  const upstashToken = process.env.UPSTASH_REDIS_REST_TOKEN?.trim();
+
+  // If Upstash Redis is configured, use distributed multi-instance atomic rate limiting
+  if (upstashUrl && upstashToken) {
+    try {
+      const key = `ratelimit:contact:${clientIp}`;
+      const windowSeconds = 600; // 10 minutes
+      const maxLimit = 5;
+
+      const response = await fetch(`${upstashUrl.replace(/\/$/, '')}/pipeline`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${upstashToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify([
+          ['INCR', key],
+          ['EXPIRE', key, windowSeconds],
+        ]),
+      });
+
+      if (response.ok) {
+        const results = await response.json();
+        const currentCount = Number(results[0]?.result || 1);
+        if (currentCount > maxLimit) {
+          return { allowed: false, waitMinutes: 10 };
+        }
+        return { allowed: true, waitMinutes: 0 };
+      }
+    } catch (redisErr) {
+      console.warn('[DESTRUST10N RateLimiter] Upstash Redis check failed, falling back to in-memory:', redisErr);
+    }
+  }
+
+  // Fallback: In-memory sliding-window rate limiter
+  return checkInMemoryRateLimit(clientIp);
+}
+
+/**
+ * Persists an inquiry across available providers:
+ * 1. Primary: Supabase PostgreSQL via PostgREST
+ * 2. Secondary: Firebase Firestore if configured
+ * 3. Fallback: Local /tmp or server/data file + structured audit logging
+ * 4. Notifications: Resend API email alert to destrust100n@gmail.com
+ */
+async function persistInquiry(record: StoredInquiry): Promise<{ stored: boolean; provider: string }> {
   let stored = false;
   let provider = 'audit_log';
 
-  // 1. Check Supabase PostgreSQL Integration
+  // 1. Primary Cloud Database: Supabase PostgreSQL
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
   const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)?.trim();
 
@@ -139,7 +182,7 @@ async function persistInquiry(record: StoredInquiry): Promise<void> {
 
       if (response.ok || response.status === 201) {
         stored = true;
-        provider = 'supabase';
+        provider = 'supabase_postgresql';
         console.log(`[DESTRUST10N Storage] Persisted inquiry ${record.id} to Supabase PostgreSQL.`);
       } else {
         const errorText = await response.text();
@@ -150,7 +193,7 @@ async function persistInquiry(record: StoredInquiry): Promise<void> {
     }
   }
 
-  // 2. Check Firebase Firestore Integration (if Supabase not active)
+  // 2. Secondary: Firebase Firestore (if Supabase not active)
   if (!stored) {
     const firebaseProjectId = process.env.FIREBASE_PROJECT_ID?.trim();
     const firebaseApiKey = process.env.FIREBASE_API_KEY?.trim();
@@ -179,7 +222,7 @@ async function persistInquiry(record: StoredInquiry): Promise<void> {
 
         if (response.ok || response.status === 200) {
           stored = true;
-          provider = 'firestore';
+          provider = 'firebase_firestore';
           console.log(`[DESTRUST10N Storage] Persisted inquiry ${record.id} to Firebase Firestore.`);
         } else {
           const errText = await response.text();
@@ -230,7 +273,7 @@ async function persistInquiry(record: StoredInquiry): Promise<void> {
     }
   }
 
-  // 4. Structured Audit Log (Indexed in Vercel Runtime Logs)
+  // 4. Structured Audit Log (Permanently indexed in Vercel Runtime Logs)
   console.info('[DESTRUST10N_INQUIRY_AUDIT]', JSON.stringify({
     inquiryId: record.id,
     timestamp: record.timestamp,
@@ -242,7 +285,7 @@ async function persistInquiry(record: StoredInquiry): Promise<void> {
     provider,
   }));
 
-  // 5. Optional Email Alert Dispatch via Resend (never blocks successful inquiry response)
+  // 5. Email Notification Relay via Resend to destrust100n@gmail.com
   const resendApiKey = process.env.RESEND_API_KEY?.trim();
   const alertRecipient = process.env.STUDIO_ALERT_EMAIL || 'destrust100n@gmail.com';
 
@@ -315,6 +358,8 @@ async function persistInquiry(record: StoredInquiry): Promise<void> {
       console.error('[DESTRUST10N Mailer] Email dispatch failed, but inquiry is safely stored:', mailError);
     }
   }
+
+  return { stored, provider };
 }
 
 /**
@@ -369,17 +414,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   try {
-    // 4. Client IP Extraction
-    const forwardedHeader = req.headers['x-forwarded-for'];
-    const forwardedFor = Array.isArray(forwardedHeader) ? forwardedHeader[0] : forwardedHeader;
+    // 4. Client IP Extraction with edge reverse-proxy precedence
     const realIpHeader = req.headers['x-real-ip'];
     const realIp = Array.isArray(realIpHeader) ? realIpHeader[0] : realIpHeader;
-    // Prioritize x-real-ip from edge proxy to prevent X-Forwarded-For spoofing
+    const forwardedHeader = req.headers['x-forwarded-for'];
+    const forwardedFor = Array.isArray(forwardedHeader) ? forwardedHeader[0] : forwardedHeader;
     const rawIp = realIp || (forwardedFor ? forwardedFor.split(',')[0].trim() : null) || req.ip || req.socket?.remoteAddress || 'unknown';
     const clientIp = rawIp.replace(/[^a-zA-Z0-9.:]/g, '').slice(0, 45);
 
-    // 5. Rate Limiting Check
-    const { allowed, waitMinutes } = checkRateLimit(clientIp);
+    // 5. Distributed / In-Memory Rate Limiting Check
+    const { allowed, waitMinutes } = await checkDistributedRateLimit(clientIp);
     if (!allowed) {
       res.status(429).json({
         success: false,
@@ -410,12 +454,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       return;
     }
 
-    // 7. Zod Schema Validation
+    // 7. Zod Schema Validation (Dual Zod 3 & 4 compatible)
     const parseResult = contactSchema.safeParse(rawBody);
     if (!parseResult.success) {
       const fieldErrors: Record<string, string> = {};
-      parseResult.error.errors.forEach((err) => {
-        if (err.path[0]) {
+      const issues = (parseResult.error as any).issues || (parseResult.error as any).errors || [];
+      issues.forEach((err: any) => {
+        if (err.path && err.path[0]) {
           fieldErrors[err.path[0] as string] = err.message;
         }
       });
@@ -465,7 +510,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       status: 'new',
     };
 
-    // 11. Multi-Store Persistent Storage
+    // 11. Multi-Store Persistent Storage (Supabase PostgreSQL primary)
     await persistInquiry(inquiryRecord);
 
     // 12. Safe Success Response
