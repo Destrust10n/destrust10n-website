@@ -3,7 +3,7 @@ import http from 'http';
 import path from 'path';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { handleContactRequest } from './server/contactHandler';
+import contactHandler from './api/contact';
 
 dotenv.config();
 
@@ -106,7 +106,7 @@ app.get('/api/health', (_req: Request, res: Response) => {
 
 // Universal contact form API route with strict validation and multi-store persistence
 app.all('/api/contact', (req: Request, res: Response) => {
-  return handleContactRequest(req as any, res as any);
+  return contactHandler(req as any, res as any);
 });
 
 // Global Error Handler (Never leaks internal stack traces to the public)
