@@ -1,6 +1,7 @@
 import contactHandler from './api/contact';
 import availabilityHandler, { getKolkataDateString, resolveAvailability } from './api/availability';
 import adminHandler from './api/admin';
+import { buildInquiryEmailHtml, sendInquiryEmail } from './api/mailer';
 import fs from 'fs';
 import path from 'path';
 
@@ -325,29 +326,11 @@ async function runTests() {
   // -----------------------------------------------------------------
   console.log('\n--- TEST GROUP 6: Asia/Kolkata Midnight Rollover Simulation ---');
   {
-    // If an inquiry was closed yesterday in Asia/Kolkata (date != today),
-    // closedCountToday will be 0 and availability will automatically reset to Available!
-    const todayKolkata = getKolkataDateString();
-    const yesterdayKolkata = '2026-01-01'; // Simulated past date
+    // Simulate tomorrow's date in Asia/Kolkata (where no project has been accepted yet)
+    // Closed inquiries from previous days should not count towards tomorrow's slot.
+    const tomorrowKolkata = '2099-01-01';
+    const nextDayAvailability = await resolveAvailability(tomorrowKolkata);
 
-    // Create a local data file where inquiry was closed on a past date
-    const targetDir = path.resolve(process.cwd(), 'server/data');
-    const pastInquiry = {
-      id: 'D10-INQ-PAST-001',
-      timestamp: new Date('2026-01-01T12:00:00Z').toISOString(),
-      name: 'Past Client',
-      email: 'past@client.com',
-      projectType: 'Starter Website',
-      budget: '$10',
-      description: 'Historical inquiry closed on a previous calendar day.',
-      ipHash: '127.0.0.1',
-      status: 'closed',
-      closedDateKolkata: yesterdayKolkata,
-    };
-
-    fs.writeFileSync(path.join(targetDir, 'inquiries.json'), JSON.stringify([pastInquiry], null, 2), 'utf-8');
-
-    const nextDayAvailability = await resolveAvailability();
     assert(
       'Next calendar day in Asia/Kolkata automatically resets availability to TRUE',
       nextDayAvailability.available === true
@@ -360,6 +343,72 @@ async function runTests() {
       'Status text resets to "Available for Work"',
       nextDayAvailability.statusText === 'Available for Work'
     );
+  }
+
+  // -----------------------------------------------------------------
+  // 6. Email System, Notification Content & Safe Retry Mechanism
+  // -----------------------------------------------------------------
+  console.log('\n--- TEST GROUP 7: Email Delivery Flow, Diagnostics & Safe Retries ---');
+  {
+    // 7.1 Verify Email HTML Template Content
+    const sampleInquiry = {
+      id: 'D10-INQ-TEST-999',
+      timestamp: new Date().toISOString(),
+      name: 'Alexander Vance',
+      email: 'alex@vance.io',
+      projectType: 'Website Redesign',
+      budget: '$50 (Premium Starter Build)',
+      description: 'Full redesign with high-performance WebGL aesthetics and zero template code.',
+    };
+
+    const html = buildInquiryEmailHtml(sampleInquiry);
+    assert('Email HTML contains client name', html.includes('Alexander Vance'));
+    assert('Email HTML contains client email', html.includes('alex@vance.io'));
+    assert('Email HTML contains project type', html.includes('Website Redesign'));
+    assert('Email HTML contains budget selection', html.includes('$50 (Premium Starter Build)'));
+    assert('Email HTML contains project requirements', html.includes('Full redesign with high-performance WebGL aesthetics'));
+    assert('Email HTML contains unique inquiry ID', html.includes('D10-INQ-TEST-999'));
+    assert('Email HTML includes direct mailto link to client', html.includes('mailto:alex@vance.io'));
+
+    // 7.2 sendInquiryEmail diagnostic when API key is missing
+    delete process.env.RESEND_API_KEY;
+    const dispatchResult = await sendInquiryEmail(sampleInquiry);
+    assert('Email dispatch fails gracefully without API key (zero 500 crashes)', dispatchResult.success === false);
+    assert('Diagnostic guides user to configure RESEND_API_KEY', dispatchResult.diagnostic?.includes('Configure RESEND_API_KEY') === true);
+    assert('Recipient defaults to destrust100n@gmail.com', dispatchResult.recipient === 'destrust100n@gmail.com');
+
+    // 7.3 Retry Email Endpoint Authorization Check
+    const unauthMock = createMockHttp('POST', { inquiryId: 'D10-INQ-TEST-999' }, {}, { action: 'retry_email' });
+    await adminHandler(unauthMock.req as any, unauthMock.res as any);
+    assert('retry_email requires administrative authentication (HTTP 401)', unauthMock.getStatusCode() === 401);
+
+    // 7.4 Retry Email Missing inquiryId
+    const missingIdMock = createMockHttp('POST', {}, { Authorization: `Bearer ${adminToken}` }, { action: 'retry_email' });
+    await adminHandler(missingIdMock.req as any, missingIdMock.res as any);
+    assert('retry_email rejects missing inquiryId (HTTP 400)', missingIdMock.getStatusCode() === 400);
+
+    // 7.5 Retry Email Non-existent inquiryId
+    const notFoundMock = createMockHttp('POST', { inquiryId: 'D10-INQ-DOESNT-EXIST' }, { Authorization: `Bearer ${adminToken}` }, { action: 'retry_email' });
+    await adminHandler(notFoundMock.req as any, notFoundMock.res as any);
+    assert('retry_email returns HTTP 404 for unknown inquiry', notFoundMock.getStatusCode() === 404);
+
+    // 7.6 Retry Email for Existing Inquiry
+    // Use firstInquiryId created in TEST GROUP 2
+    const retryMock = createMockHttp('POST', { inquiryId: firstInquiryId }, { Authorization: `Bearer ${adminToken}` }, { action: 'retry_email' });
+    await adminHandler(retryMock.req as any, retryMock.res as any);
+    const retryRes = retryMock.getResponse();
+    // Since RESEND_API_KEY is not configured locally, it should return 502 with diagnostic details without losing the inquiry
+    assert('retry_email records failure and attempts count without losing inquiry', retryMock.getStatusCode() === 502 && retryRes.attempts >= 1);
+    assert('retry_email provides actionable diagnostic guidance', retryRes.diagnostic?.includes('RESEND_API_KEY') === true);
+
+    // 7.7 Verify inquiry still exists safely in storage
+    const fetchMock = createMockHttp('GET', {}, { Authorization: `Bearer ${adminToken}` }, { action: 'inquiries' });
+    await adminHandler(fetchMock.req as any, fetchMock.res as any);
+    const inquiriesList = fetchMock.getResponse()?.inquiries;
+    const targetInq = inquiriesList?.find((i: any) => i.id === firstInquiryId);
+    assert('Inquiry is securely preserved in storage after failed email attempt', Boolean(targetInq));
+    assert('Inquiry records email_status as failed/pending', targetInq?.email_status === 'failed' || targetInq?.emailStatus === 'failed');
+    assert('Inquiry records email attempts count', (targetInq?.email_attempts || targetInq?.emailAttempts) >= 1);
   }
 
   console.log('\n================================================================');

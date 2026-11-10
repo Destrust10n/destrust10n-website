@@ -2,6 +2,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import { sendInquiryEmail, EmailDispatchResult } from './mailer';
 
 export interface ApiRequest {
   method?: string;
@@ -35,6 +36,12 @@ export interface StoredInquiry {
   ipHash: string;
   userAgent?: string;
   status: 'new' | 'reviewed' | 'closed';
+  emailStatus?: 'sent' | 'failed' | 'skipped' | 'pending';
+  emailError?: string | null;
+  emailSentAt?: string | null;
+  emailAttempts?: number;
+  emailRecipient?: string;
+  emailLastAttemptAt?: string | null;
 }
 
 // In-memory duplicate submission detector (5-minute sliding window)
@@ -171,18 +178,10 @@ async function checkDistributedRateLimit(clientIp: string): Promise<{ allowed: b
  * 1. Primary: Supabase PostgreSQL via PostgREST
  * 2. Secondary: Firebase Firestore if configured
  * 3. Fallback: Local /tmp or server/data file + structured audit logging
- * 4. Notifications: Resend API email alert to destrust100n@gmail.com
  */
-async function persistInquiry(record: StoredInquiry): Promise<{
-  stored: boolean;
-  provider: string;
-  emailSent: boolean;
-  emailError: string | null
-}> {
+async function persistInquiry(record: StoredInquiry): Promise<{ stored: boolean; provider: string }> {
   let stored = false;
   let provider = 'audit_log';
-  let emailSent = false;
-  let emailError: string | null = null;
 
   // 1. Primary Cloud Database: Supabase PostgreSQL
   const supabaseUrl = process.env.SUPABASE_URL?.trim();
@@ -211,6 +210,9 @@ async function persistInquiry(record: StoredInquiry): Promise<{
           ip_hash: record.ipHash,
           user_agent: record.userAgent || '',
           status: record.status,
+          email_status: 'pending',
+          email_attempts: 0,
+          email_recipient: 'destrust100n@gmail.com',
         }),
       });
 
@@ -250,6 +252,7 @@ async function persistInquiry(record: StoredInquiry): Promise<{
               ipHash: { stringValue: record.ipHash },
               userAgent: { stringValue: record.userAgent || '' },
               status: { stringValue: record.status },
+              emailStatus: { stringValue: 'pending' },
             },
           }),
         });
@@ -291,7 +294,12 @@ async function persistInquiry(record: StoredInquiry): Promise<{
       }
     }
 
-    existingList.push(record);
+    existingList.push({
+      ...record,
+      emailStatus: 'pending',
+      emailAttempts: 0,
+      emailRecipient: 'destrust100n@gmail.com',
+    });
     fs.writeFileSync(filePath, JSON.stringify(existingList, null, 2), 'utf-8');
 
     if (!stored) {
@@ -319,84 +327,73 @@ async function persistInquiry(record: StoredInquiry): Promise<{
     provider,
   }));
 
-  // 5. Email Notification Relay via Resend to destrust100n@gmail.com
-  const resendApiKey = process.env.RESEND_API_KEY?.trim();
-  const alertRecipient = process.env.STUDIO_ALERT_EMAIL || 'destrust100n@gmail.com';
+  return { stored, provider };
+}
 
-  if (resendApiKey) {
+/**
+ * Updates the stored inquiry with the outcome of the email notification attempt
+ */
+async function updateStoredEmailStatus(
+  inquiryId: string,
+  result: EmailDispatchResult
+): Promise<void> {
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY)?.trim();
+  const nowIso = new Date().toISOString();
+
+  const emailStatus = result.success
+    ? 'sent'
+    : (result.provider === 'none' ? 'skipped' : 'failed');
+
+  const updatePayload: Record<string, any> = {
+    email_status: emailStatus,
+    email_error: result.success ? null : (result.error || null),
+    email_attempts: 1,
+    email_last_attempt_at: nowIso,
+    email_recipient: result.recipient,
+    ...(result.success && result.sentAt ? { email_sent_at: result.sentAt } : {}),
+  };
+
+  // 1. Update Supabase
+  if (supabaseUrl && supabaseKey) {
     try {
-      const emailHtml = `
-<!DOCTYPE html>
-<html>
-<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #050608; color: #F5F7FA; padding: 32px 16px;">
-  <div style="max-width: 600px; margin: 0 auto; background-color: #101318; border: 1px solid rgba(0, 229, 255, 0.25); border-radius: 12px; padding: 24px;">
-    <div style="border-bottom: 1px solid rgba(255,255,255,0.08); padding-bottom: 16px; margin-bottom: 20px;">
-      <span style="font-family: monospace; font-size: 11px; color: #00E5FF; text-transform: uppercase;">DESTRUST10N // NEW INQUIRY</span>
-      <h2 style="margin: 8px 0 0; color: #F5F7FA; font-size: 20px;">Project Inquiry: ${record.projectType}</h2>
-      <p style="margin: 4px 0 0; color: #929AA5; font-size: 13px;">Ref: <strong>${record.id}</strong> | ${record.timestamp}</p>
-    </div>
-    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px;">
-      <tr>
-        <td style="padding: 8px 0; color: #929AA5; width: 120px;">Client Name:</td>
-        <td style="padding: 8px 0; color: #F5F7FA; font-weight: 600;">${record.name}</td>
-      </tr>
-      <tr>
-        <td style="padding: 8px 0; color: #929AA5;">Client Email:</td>
-        <td style="padding: 8px 0;"><a href="mailto:${record.email}" style="color: #00E5FF; text-decoration: none;">${record.email}</a></td>
-      </tr>
-      <tr>
-        <td style="padding: 8px 0; color: #929AA5;">Project Type:</td>
-        <td style="padding: 8px 0; color: #F5F7FA;">${record.projectType}</td>
-      </tr>
-      <tr>
-        <td style="padding: 8px 0; color: #929AA5;">Budget:</td>
-        <td style="padding: 8px 0; color: #00E5FF; font-weight: 600;">${record.budget}</td>
-      </tr>
-    </table>
-    <div style="background-color: rgba(0, 229, 255, 0.04); border-left: 3px solid #00E5FF; padding: 16px; border-radius: 4px; margin-bottom: 24px;">
-      <p style="margin: 0 0 8px; color: #929AA5; font-size: 12px; text-transform: uppercase;">Project Requirements:</p>
-      <p style="margin: 0; color: #F5F7FA; font-size: 14px; line-height: 1.6; white-space: pre-wrap;">${record.description}</p>
-    </div>
-    <div style="text-align: center; padding-top: 12px; border-top: 1px solid rgba(255,255,255,0.08);">
-      <a href="mailto:${record.email}?subject=Re:%20DESTRUST10N%20Project%20Inquiry%20[${record.id}]"
-         style="display: inline-block; background-color: #00E5FF; color: #050608; font-weight: bold; font-size: 13px; text-decoration: none; padding: 10px 20px; border-radius: 6px;">
-        Reply Directly to Client
-      </a>
-    </div>
-  </div>
-</body>
-</html>`;
-
-      const emailResponse = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
+      await fetch(`${supabaseUrl.replace(/\/$/, '')}/rest/v1/inquiries?id=eq.${inquiryId}`, {
+        method: 'PATCH',
         headers: {
-          Authorization: `Bearer ${resendApiKey}`,
+          apikey: supabaseKey,
+          Authorization: `Bearer ${supabaseKey}`,
           'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
         },
-        body: JSON.stringify({
-          from: 'DESTRUST10N Studio <onboarding@resend.dev>',
-          to: [alertRecipient],
-          reply_to: record.email,
-          subject: `[DESTRUST10N Inquiry] ${record.name} — ${record.projectType} (${record.budget})`,
-          html: emailHtml,
-        }),
+        body: JSON.stringify(updatePayload),
       });
-
-      if (emailResponse.ok) {
-        emailSent = true;
-        console.log(`[DESTRUST10N Mailer] Notification email dispatched to ${alertRecipient} via Resend.`);
-      } else {
-        const emailErr = await emailResponse.text();
-        emailError = `Resend HTTP ${emailResponse.status}: ${emailErr}`;
-        console.warn(`[DESTRUST10N Mailer] Resend returned HTTP ${emailResponse.status}: ${emailErr}`);
-      }
-    } catch (mailError) {
-      emailError = mailError instanceof Error ? mailError.message : String(mailError);
-      console.error('[DESTRUST10N Mailer] Email dispatch failed, but inquiry is safely stored:', mailError);
+    } catch (err) {
+      console.warn('[DESTRUST10N Storage] Failed to update email status in Supabase:', err);
     }
   }
 
-  return { stored, provider, emailSent, emailError };
+  // 2. Update Local Storage / tmp
+  try {
+    const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+    const targetDir = isServerless ? '/tmp' : path.resolve(process.cwd(), 'server/data');
+    const filePath = path.join(targetDir, 'inquiries.json');
+    if (fs.existsSync(filePath)) {
+      const list = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      const index = list.findIndex((i: any) => i.id === inquiryId);
+      if (index !== -1) {
+        list[index] = {
+          ...list[index],
+          emailStatus,
+          emailError: result.success ? null : (result.error || null),
+          emailAttempts: 1,
+          emailLastAttemptAt: nowIso,
+          emailRecipient: result.recipient,
+          ...(result.success && result.sentAt ? { emailSentAt: result.sentAt } : {}),
+        };
+        fs.writeFileSync(filePath, JSON.stringify(list, null, 2), 'utf-8');
+      }
+    }
+  } catch {}
 }
 
 /**
@@ -556,7 +553,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       status: 'new',
     };
 
-    // 12. Multi-Store Persistent Storage (Supabase PostgreSQL primary)
+    // 12. STEP 1: Multi-Store Persistent Storage (Inquiry saved FIRST)
     const storageResult = await persistInquiry(inquiryRecord);
 
     if (!storageResult.stored) {
@@ -567,17 +564,33 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       return;
     }
 
-    // 13. Safe Success Response
-    const emailNotice = storageResult.emailError
-      ? ' (Note: Email notification relay experienced a delivery issue, but your inquiry is securely preserved for review).'
-      : '';
+    // 13. STEP 2: Dedicated Email Notification Relay (Separate Operation)
+    const emailDispatch = await sendInquiryEmail({
+      id: inquiryRecord.id,
+      timestamp: inquiryRecord.timestamp,
+      name: inquiryRecord.name,
+      email: inquiryRecord.email,
+      projectType: inquiryRecord.projectType,
+      budget: inquiryRecord.budget,
+      description: inquiryRecord.description,
+    });
+
+    // 14. STEP 3: Record Email Delivery Outcome in Database
+    await updateStoredEmailStatus(inquiryRecord.id, emailDispatch);
+
+    // 15. Formulate Transparent Response
+    const responseMessage = emailDispatch.success
+      ? 'Your project inquiry has been securely received by DESTRUST10N and alert sent to studio inbox.'
+      : 'Your project inquiry has been securely received and recorded by DESTRUST10N. (Studio alert is queued).';
 
     res.status(200).json({
       success: true,
-      message: `Your project inquiry has been securely received by DESTRUST10N.${emailNotice}`,
+      message: responseMessage,
       inquiryId,
       provider: storageResult.provider,
-      emailDelivered: storageResult.emailSent,
+      emailDelivered: emailDispatch.success,
+      emailStatus: emailDispatch.success ? 'sent' : (emailDispatch.provider === 'none' ? 'skipped' : 'failed'),
+      ...(emailDispatch.diagnostic ? { emailDiagnostic: emailDispatch.diagnostic } : {}),
       timestamp: new Date().toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',

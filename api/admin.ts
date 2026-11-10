@@ -1,5 +1,6 @@
 import type { ApiRequest, ApiResponse } from './types';
 import { getKolkataDateString, resolveAvailability } from './availability';
+import { sendInquiryEmail, InquiryEmailData } from './mailer';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
@@ -290,6 +291,142 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       message: `Availability mode set to ${overrideMode}.`,
       availability: updatedAvailability,
     });
+    return;
+  }
+
+  // 5. ACTION: RETRY EMAIL NOTIFICATION (Safe retry mechanism, prevents duplicate alerts)
+  if (action === 'retry_email' && req.method === 'POST') {
+    let body = req.body;
+    if (typeof body === 'string') {
+      try { body = JSON.parse(body); } catch {}
+    }
+
+    const { inquiryId, force } = body || {};
+    if (!inquiryId) {
+      res.status(400).json({ success: false, message: 'inquiryId is required.' });
+      return;
+    }
+
+    // Retrieve inquiry record
+    let targetInquiry: any = null;
+    if (supabaseUrl && supabaseKey) {
+      try {
+        const queryRes = await fetch(`${supabaseUrl.replace(/\/$/, '')}/rest/v1/inquiries?id=eq.${inquiryId}&select=*`, {
+          headers: {
+            apikey: supabaseKey,
+            Authorization: `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+          },
+        });
+        if (queryRes.ok) {
+          const list = await queryRes.json();
+          if (Array.isArray(list) && list.length > 0) {
+            targetInquiry = list[0];
+          }
+        }
+      } catch (err) {
+        console.warn('[DESTRUST10N Admin] Supabase fetch for retry failed:', err);
+      }
+    }
+
+    if (!targetInquiry) {
+      try {
+        const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+        const targetDir = isServerless ? '/tmp' : path.resolve(process.cwd(), 'server/data');
+        const filePath = path.join(targetDir, 'inquiries.json');
+        if (fs.existsSync(filePath)) {
+          const list = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+          targetInquiry = list.find((i: any) => i.id === inquiryId);
+        }
+      } catch {}
+    }
+
+    if (!targetInquiry) {
+      res.status(404).json({ success: false, message: `Inquiry ${inquiryId} not found.` });
+      return;
+    }
+
+    // Duplicate alert protection: If already delivered successfully and not explicitly forced, reject resend
+    if (targetInquiry.email_status === 'sent' && !force) {
+      res.status(409).json({
+        success: false,
+        message: 'Notification email was already delivered successfully to destrust100n@gmail.com. Pass force=true to bypass.',
+        emailStatus: 'sent',
+        sentAt: targetInquiry.email_sent_at,
+      });
+      return;
+    }
+
+    const emailData: InquiryEmailData = {
+      id: targetInquiry.id,
+      timestamp: targetInquiry.timestamp,
+      name: targetInquiry.name,
+      email: targetInquiry.email,
+      projectType: targetInquiry.project_type || targetInquiry.projectType,
+      budget: targetInquiry.budget,
+      description: targetInquiry.description,
+    };
+
+    const dispatchResult = await sendInquiryEmail(emailData);
+    const nowIso = new Date().toISOString();
+    const attempts = (targetInquiry.email_attempts || 0) + 1;
+
+    const emailUpdates: Record<string, any> = {
+      email_status: dispatchResult.success ? 'sent' : 'failed',
+      email_error: dispatchResult.success ? null : (dispatchResult.error || 'Unknown delivery failure'),
+      email_attempts: attempts,
+      email_last_attempt_at: nowIso,
+      ...(dispatchResult.success ? { email_sent_at: nowIso } : {}),
+    };
+
+    // Update in Supabase
+    if (supabaseUrl && supabaseKey) {
+      try {
+        await fetch(`${supabaseUrl.replace(/\/$/, '')}/rest/v1/inquiries?id=eq.${inquiryId}`, {
+          method: 'PATCH',
+          headers: {
+            apikey: supabaseKey,
+            Authorization: `Bearer ${supabaseKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(emailUpdates),
+        });
+      } catch (err) {
+        console.warn('[DESTRUST10N Admin] Supabase update after retry failed:', err);
+      }
+    }
+
+    // Update in Local / tmp
+    try {
+      const isServerless = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+      const targetDir = isServerless ? '/tmp' : path.resolve(process.cwd(), 'server/data');
+      const filePath = path.join(targetDir, 'inquiries.json');
+      if (fs.existsSync(filePath)) {
+        const list = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        const index = list.findIndex((inq: any) => inq.id === inquiryId);
+        if (index !== -1) {
+          list[index] = { ...list[index], ...emailUpdates };
+          fs.writeFileSync(filePath, JSON.stringify(list, null, 2), 'utf-8');
+        }
+      }
+    } catch {}
+
+    if (dispatchResult.success) {
+      res.status(200).json({
+        success: true,
+        message: `Notification email successfully dispatched to ${dispatchResult.recipient}.`,
+        messageId: dispatchResult.messageId,
+        emailStatus: 'sent',
+      });
+    } else {
+      res.status(502).json({
+        success: false,
+        message: `Email delivery attempt failed: ${dispatchResult.error}`,
+        diagnostic: dispatchResult.diagnostic,
+        emailStatus: 'failed',
+        attempts,
+      });
+    }
     return;
   }
 

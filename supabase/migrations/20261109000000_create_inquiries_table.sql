@@ -17,13 +17,44 @@ CREATE TABLE IF NOT EXISTS public.inquiries (
   status VARCHAR(20) NOT NULL DEFAULT 'new', -- 'new' | 'reviewed' | 'closed'
   reviewed_at TIMESTAMPTZ,
   closed_at TIMESTAMPTZ,
-  closed_date_kolkata VARCHAR(10) -- Format 'YYYY-MM-DD' calculated in Asia/Kolkata
+  closed_date_kolkata VARCHAR(10), -- Format 'YYYY-MM-DD' calculated in Asia/Kolkata
+  -- Delivery tracking fields
+  email_status VARCHAR(20) NOT NULL DEFAULT 'pending', -- 'sent' | 'failed' | 'skipped' | 'pending'
+  email_error TEXT,
+  email_sent_at TIMESTAMPTZ,
+  email_attempts INT NOT NULL DEFAULT 0,
+  email_recipient VARCHAR(100) DEFAULT 'destrust100n@gmail.com',
+  email_last_attempt_at TIMESTAMPTZ
 );
+
+-- Backward-compatible column additions (if table already exists in Supabase)
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'inquiries' AND column_name = 'email_status') THEN
+    ALTER TABLE public.inquiries ADD COLUMN email_status VARCHAR(20) NOT NULL DEFAULT 'pending';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'inquiries' AND column_name = 'email_error') THEN
+    ALTER TABLE public.inquiries ADD COLUMN email_error TEXT;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'inquiries' AND column_name = 'email_sent_at') THEN
+    ALTER TABLE public.inquiries ADD COLUMN email_sent_at TIMESTAMPTZ;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'inquiries' AND column_name = 'email_attempts') THEN
+    ALTER TABLE public.inquiries ADD COLUMN email_attempts INT NOT NULL DEFAULT 0;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'inquiries' AND column_name = 'email_recipient') THEN
+    ALTER TABLE public.inquiries ADD COLUMN email_recipient VARCHAR(100) DEFAULT 'destrust100n@gmail.com';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'inquiries' AND column_name = 'email_last_attempt_at') THEN
+    ALTER TABLE public.inquiries ADD COLUMN email_last_attempt_at TIMESTAMPTZ;
+  END IF;
+END $$;
 
 -- Index frequently filtered fields
 CREATE INDEX IF NOT EXISTS idx_inquiries_timestamp ON public.inquiries (timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_inquiries_status ON public.inquiries (status);
 CREATE INDEX IF NOT EXISTS idx_inquiries_closed_date ON public.inquiries (closed_date_kolkata);
+CREATE INDEX IF NOT EXISTS idx_inquiries_email_status ON public.inquiries (email_status);
 
 -- Enable Row Level Security (RLS) on inquiries
 ALTER TABLE public.inquiries ENABLE ROW LEVEL SECURITY;

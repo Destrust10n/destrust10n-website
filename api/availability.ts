@@ -26,10 +26,11 @@ export function getKolkataDateString(d: Date = new Date()): string {
 }
 
 /**
- * Resolves availability status based on Supabase PostgreSQL data or local fallback
+ * Resolves availability status based on Supabase PostgreSQL data or local fallback.
+ * Accepts optional currentDateKolkata for testing date rollovers (defaults to current date in Asia/Kolkata).
  */
-export async function resolveAvailability(): Promise<AvailabilityState> {
-  const dateKolkata = getKolkataDateString();
+export async function resolveAvailability(currentDateKolkata?: string): Promise<AvailabilityState> {
+  const dateKolkata = currentDateKolkata || getKolkataDateString();
   let overrideMode: 'auto' | 'force_available' | 'force_unavailable' = 'auto';
   let closedCountToday = 0;
 

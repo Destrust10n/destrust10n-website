@@ -18,6 +18,14 @@ interface StoredInquiry {
   reviewed_at?: string;
   closed_at?: string;
   ip_hash?: string;
+  email_status?: 'sent' | 'failed' | 'skipped' | 'pending';
+  emailStatus?: 'sent' | 'failed' | 'skipped' | 'pending';
+  email_error?: string | null;
+  emailError?: string | null;
+  email_sent_at?: string | null;
+  emailSentAt?: string | null;
+  email_attempts?: number;
+  emailAttempts?: number;
 }
 
 interface AvailabilityData {
@@ -52,6 +60,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
   const [selectedInquiry, setSelectedInquiry] = useState<StoredInquiry | null>(null);
   const [filterStatus, setFilterStatus] = useState<'all' | 'new' | 'reviewed' | 'closed'>('all');
   const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [isRetryingEmail, setIsRetryingEmail] = useState(false);
 
   // Fetch inquiries and availability
   const loadDashboardData = async () => {
@@ -197,6 +206,96 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
       }
     } catch (err) {
       console.error('[Admin] Override failed:', err);
+    }
+  };
+
+  // Safe retry email notification handler
+  const handleRetryEmail = async (inquiryId: string, force = false) => {
+    if (!token) return;
+    setIsRetryingEmail(true);
+    setActionMessage(null);
+
+    try {
+      const res = await fetch('/api/admin?action=retry_email', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ inquiryId, force }),
+      });
+
+      const data = await res.json();
+      if (res.ok && data.success) {
+        setActionMessage(`Notification email successfully delivered to destrust100n@gmail.com! (Message ID: ${data.messageId || 'confirmed'})`);
+        // Update local list
+        setInquiries((prev) =>
+          prev.map((inq) =>
+            inq.id === inquiryId
+              ? {
+                  ...inq,
+                  email_status: 'sent',
+                  emailStatus: 'sent',
+                  email_error: null,
+                  emailError: null,
+                  email_sent_at: new Date().toISOString(),
+                  emailSentAt: new Date().toISOString(),
+                }
+              : inq
+          )
+        );
+        if (selectedInquiry?.id === inquiryId) {
+          setSelectedInquiry((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  email_status: 'sent',
+                  emailStatus: 'sent',
+                  email_error: null,
+                  emailError: null,
+                  email_sent_at: new Date().toISOString(),
+                  emailSentAt: new Date().toISOString(),
+                }
+              : null
+          );
+        }
+      } else {
+        const errorDetail = data.message || 'Email delivery failed.';
+        const diagNotice = data.diagnostic ? ` (${data.diagnostic})` : '';
+        setActionMessage(`Email dispatch error: ${errorDetail}${diagNotice}`);
+        // Update local list with error
+        setInquiries((prev) =>
+          prev.map((inq) =>
+            inq.id === inquiryId
+              ? {
+                  ...inq,
+                  email_status: 'failed',
+                  emailStatus: 'failed',
+                  email_error: errorDetail,
+                  emailError: errorDetail,
+                }
+              : inq
+          )
+        );
+        if (selectedInquiry?.id === inquiryId) {
+          setSelectedInquiry((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  email_status: 'failed',
+                  emailStatus: 'failed',
+                  email_error: errorDetail,
+                  emailError: errorDetail,
+                }
+              : null
+          );
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setActionMessage(`Network error during email dispatch: ${msg}`);
+    } finally {
+      setIsRetryingEmail(false);
     }
   };
 
@@ -504,6 +603,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
                           <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#00E5FF]/10 text-[#00E5FF]">
                             {inq.budget}
                           </span>
+                          <span
+                            className={`text-[9px] font-mono px-2 py-0.5 rounded flex items-center gap-1 ${
+                              (inq.email_status || inq.emailStatus) === 'sent'
+                                ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                                : (inq.email_status || inq.emailStatus) === 'failed'
+                                ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                                : 'bg-white/5 text-[#929AA5]'
+                            }`}
+                            title={inq.email_error || inq.emailError || 'Email delivery status'}
+                          >
+                            <Mail className="w-2.5 h-2.5" />
+                            <span className="uppercase">{(inq.email_status || inq.emailStatus) || 'pending'}</span>
+                          </span>
                         </div>
 
                         <p className="text-xs text-[#929AA5] mt-1.5 line-clamp-1 max-w-2xl">
@@ -578,6 +690,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onClose }) => {
                 <div className="p-4 rounded-2xl bg-[#050608]/80 border border-white/10 text-sm text-[#F5F7FA] leading-relaxed whitespace-pre-wrap">
                   {selectedInquiry.description}
                 </div>
+              </div>
+
+              {/* Studio Email Notification Status & Retry Panel */}
+              <div className="p-4 rounded-2xl bg-[#050608] border border-white/10 space-y-2.5">
+                <div className="flex items-center justify-between text-xs font-mono">
+                  <span className="text-[#929AA5] uppercase tracking-wider flex items-center gap-1.5">
+                    <Mail className="w-3.5 h-3.5 text-[#00E5FF]" />
+                    <span>Studio Inbox Alert:</span>
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider ${
+                        (selectedInquiry.email_status || selectedInquiry.emailStatus) === 'sent'
+                          ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30'
+                          : (selectedInquiry.email_status || selectedInquiry.emailStatus) === 'failed'
+                          ? 'bg-red-500/15 text-red-400 border border-red-500/30'
+                          : 'bg-zinc-800 text-zinc-400 border border-white/10'
+                      }`}
+                    >
+                      {(selectedInquiry.email_status || selectedInquiry.emailStatus) || 'Pending'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={isRetryingEmail}
+                      onClick={() => handleRetryEmail(selectedInquiry.id, true)}
+                      className="px-2.5 py-1 rounded-lg text-[10px] font-mono text-[#00E5FF] hover:bg-[#00E5FF]/10 border border-[#00E5FF]/30 transition-colors flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                      title="Dispatch or resend notification to destrust100n@gmail.com"
+                    >
+                      <RefreshCw className={`w-3 h-3 ${isRetryingEmail ? 'animate-spin' : ''}`} />
+                      <span>{isRetryingEmail ? 'Dispatching...' : 'Retry Alert'}</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Detailed delivery error notice if failed */}
+                {(selectedInquiry.email_error || selectedInquiry.emailError) && (
+                  <div className="p-3 rounded-xl bg-red-950/40 border border-red-500/30 text-xs font-mono text-red-300">
+                    <strong className="text-red-400 block mb-0.5">Delivery Notice:</strong>
+                    <span className="break-words">{selectedInquiry.email_error || selectedInquiry.emailError}</span>
+                  </div>
+                )}
+
+                {(selectedInquiry.email_sent_at || selectedInquiry.emailSentAt) && (
+                  <p className="text-[11px] font-mono text-[#929AA5]">
+                    Confirmed delivered to <strong className="text-[#F5F7FA]">destrust100n@gmail.com</strong> on{' '}
+                    {new Date(selectedInquiry.email_sent_at || selectedInquiry.emailSentAt!).toLocaleString('en-IN', {
+                      timeZone: 'Asia/Kolkata',
+                    })}{' '}
+                    IST.
+                  </p>
+                )}
               </div>
 
               {/* Action Buttons */}
