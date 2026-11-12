@@ -1,4 +1,4 @@
-import type { ApiRequest, ApiResponse } from './types';
+import type { ApiRequest, ApiResponse } from './types.js';
 
 /**
  * Vercel Serverless Function: GET /api/health

@@ -1,4 +1,4 @@
-import type { ApiRequest, ApiResponse } from './types';
+import type { ApiRequest, ApiResponse } from './types.js';
 import fs from 'fs';
 import path from 'path';
 

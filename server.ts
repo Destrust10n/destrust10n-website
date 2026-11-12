@@ -3,9 +3,9 @@ import http from 'http';
 import path from 'path';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import contactHandler from './api/contact';
-import availabilityHandler from './api/availability';
-import adminHandler from './api/admin';
+import contactHandler from './api/contact.js';
+import availabilityHandler from './api/availability.js';
+import adminHandler from './api/admin.js';
 
 dotenv.config();
 

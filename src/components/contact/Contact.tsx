@@ -346,7 +346,7 @@ export const Contact: React.FC = () => {
                   </div>
                 </div>
               ) : (
-                <form onSubmit={handleSubmit} noValidate className="space-y-6">
+                <form onSubmit={handleSubmit} noValidate autoComplete="off" className="space-y-6">
 
                   {/* Realtime Availability Status Header */}
                   <div className="pb-4 border-b border-white/10 flex items-center justify-between">
@@ -389,7 +389,11 @@ export const Contact: React.FC = () => {
                       </label>
                       <input
                         id="name"
+                        name="visitor_full_name"
                         type="text"
+                        autoComplete="off"
+                        data-lpignore="true"
+                        data-1p-ignore="true"
                         maxLength={80}
                         value={formData.name}
                         onChange={(e) => setFormData({ ...formData, name: e.target.value })}
@@ -404,14 +408,21 @@ export const Contact: React.FC = () => {
                       )}
                     </div>
 
-                    {/* Email Field */}
+                    {/* Email Field - Hardened against browser personal profile autofill */}
                     <div>
                       <label htmlFor="email" className="block text-xs font-mono uppercase tracking-wider text-[#929AA5] mb-2">
                         Email Address <span className="text-[#00E5FF]">*</span>
                       </label>
                       <input
                         id="email"
+                        name="inquiry_contact_email"
                         type="email"
+                        autoComplete="off"
+                        autoCapitalize="none"
+                        autoCorrect="off"
+                        spellCheck="false"
+                        data-lpignore="true"
+                        data-1p-ignore="true"
                         maxLength={100}
                         value={formData.email}
                         onChange={(e) => setFormData({ ...formData, email: e.target.value })}

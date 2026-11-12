@@ -2,7 +2,7 @@ import { z } from 'zod';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { sendInquiryEmail, EmailDispatchResult } from './mailer';
+import { sendInquiryEmail, EmailDispatchResult } from './mailer.js';
 
 export interface ApiRequest {
   method?: string;

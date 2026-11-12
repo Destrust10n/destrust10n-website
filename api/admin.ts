@@ -1,6 +1,6 @@
-import type { ApiRequest, ApiResponse } from './types';
-import { getKolkataDateString, resolveAvailability } from './availability';
-import { sendInquiryEmail, InquiryEmailData } from './mailer';
+import type { ApiRequest, ApiResponse } from './types.js';
+import { getKolkataDateString, resolveAvailability } from './availability.js';
+import { sendInquiryEmail, InquiryEmailData } from './mailer.js';
 import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';

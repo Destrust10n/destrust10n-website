@@ -1,7 +1,7 @@
-import contactHandler from './api/contact';
-import availabilityHandler, { getKolkataDateString, resolveAvailability } from './api/availability';
-import adminHandler from './api/admin';
-import { buildInquiryEmailHtml, sendInquiryEmail } from './api/mailer';
+import contactHandler from './api/contact.js';
+import availabilityHandler, { getKolkataDateString, resolveAvailability } from './api/availability.js';
+import adminHandler from './api/admin.js';
+import { buildInquiryEmailHtml, sendInquiryEmail } from './api/mailer.js';
 import fs from 'fs';
 import path from 'path';
 
